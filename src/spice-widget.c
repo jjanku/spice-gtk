@@ -38,6 +38,8 @@
 #endif
 #endif
 
+#include <spice/vd_agent.h>
+
 #include "spice-widget.h"
 #include "spice-widget-priv.h"
 #include "spice-gtk-session-priv.h"
@@ -70,6 +72,7 @@
  */
 
 G_DEFINE_TYPE(SpiceDisplay, spice_display, GTK_TYPE_EVENT_BOX)
+#define SEAMLESS_MODE_BORDER 10
 
 /* Properties */
 enum {
@@ -120,6 +123,9 @@ static void size_allocate(GtkWidget *widget, GtkAllocation *conf, gpointer data)
 static gboolean draw_event(GtkWidget *widget, cairo_t *cr, gpointer data);
 static void update_size_request(SpiceDisplay *display);
 static GdkDevice *spice_gdk_window_get_pointing_device(GdkWindow *window);
+static gboolean draw_seamless(GtkWidget *widget, GdkEventExpose *event, gpointer userdata);
+static void main_seamless_mode_update(SpiceChannel *channel, GParamSpec *pspec, SpiceDisplay *display);
+static void set_seamless_mode(SpiceChannel *channel, GParamSpec *pspec, SpiceDisplay *display);
 
 /* ---------------------------------------------------------------- */
 
@@ -2089,11 +2095,15 @@ static gboolean button_event(GtkWidget *widget, GdkEventButton *button)
 
     switch (button->type) {
     case GDK_BUTTON_PRESS:
+        d->mouse_button_down = TRUE;
+        spice_display_update_seamless_mode(display);
         spice_inputs_button_press(d->inputs,
                                   button_gdk_to_spice(button->button),
                                   button_mask_gdk_to_spice(button->state));
         break;
     case GDK_BUTTON_RELEASE:
+        d->mouse_button_down = FALSE;
+        spice_display_update_seamless_mode(display);
         spice_inputs_button_release(d->inputs,
                                     button_gdk_to_spice(button->button),
                                     button_mask_gdk_to_spice(button->state));
@@ -2944,6 +2954,8 @@ static void channel_new(SpiceSession *s, SpiceChannel *channel, gpointer data)
         d->main = SPICE_MAIN_CHANNEL(channel);
         spice_g_signal_connect_object(channel, "main-mouse-update",
                                       G_CALLBACK(update_mouse_mode), display, 0);
+        spice_g_signal_connect_object(channel, "notify::seamless-mode",
+                                      G_CALLBACK(set_seamless_mode), display, 0);
         update_mouse_mode(channel, display);
         return;
     }
@@ -3067,6 +3079,56 @@ static void channel_destroy(SpiceSession *s, SpiceChannel *channel, gpointer dat
     return;
 }
 
+static gboolean draw_seamless(GtkWidget *widget, GdkEventExpose *event, gpointer userdata)
+{
+    cairo_t *cr;
+
+    cr = gdk_cairo_create(gtk_widget_get_window(widget));
+
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.0);
+
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_paint(cr);
+
+    cairo_destroy(cr);
+
+    return FALSE;
+}
+
+static void main_seamless_mode_update(SpiceChannel *channel,
+                                      GParamSpec *pspec,
+                                      SpiceDisplay *display)
+{
+    spice_display_update_seamless_mode(display);
+}
+
+static void set_seamless_mode(SpiceChannel *channel,
+                              GParamSpec *pspec,
+                              SpiceDisplay *display)
+{
+    gboolean enabled;
+    g_object_get(display->priv->main, "seamless-mode", &enabled, NULL);
+
+    if (enabled)
+    {
+        GtkWidget *toplevel = gtk_widget_get_toplevel(GTK_WIDGET(display));
+
+        g_signal_connect(G_OBJECT(toplevel), "draw",
+                         G_CALLBACK(draw_seamless), NULL);
+
+        g_signal_connect(display->priv->main, "notify::seamless-mode-list",
+                         G_CALLBACK(main_seamless_mode_update), display);
+    } else {
+        g_signal_handlers_disconnect_by_func(display->priv->main,
+                                             G_CALLBACK(draw_seamless),
+                                             NULL);
+
+        g_signal_handlers_disconnect_by_func(display->priv->main,
+                                             G_CALLBACK(main_seamless_mode_update),
+                                             display);
+    }
+}
+
 /**
  * spice_display_new:
  * @session: a #SpiceSession
@@ -3100,6 +3162,62 @@ SpiceDisplay* spice_display_new_with_monitor(SpiceSession *session, gint channel
                         "channel-id", channel_id,
                         "monitor-id", monitor_id,
                         NULL);
+}
+
+/**
+ * spice_display_update_seamless_mode:
+ * @display: a #SpiceDisplay
+ *
+ * Updates SpiceDisplay when using seamless mode.
+ **/
+void spice_display_update_seamless_mode(SpiceDisplay *display)
+{
+    SpiceDisplayPrivate *d = display->priv;
+    GtkWidget *toplevel = NULL;
+    GList *l = NULL, *list = NULL;
+    cairo_region_t *region = NULL;
+    gboolean enabled;
+
+    toplevel = gtk_widget_get_toplevel(GTK_WIDGET(display));
+
+    g_object_get(display->priv->main, "seamless-mode", &enabled, NULL);
+    if (!enabled) {
+        //disable window click-through
+        gdk_window_input_shape_combine_region(gtk_widget_get_window(toplevel), NULL, 0, 0);
+        return;
+    }
+
+    list = spice_main_get_seamless_mode_list(d->main);
+
+    if (list != NULL) {
+        GdkRectangle *window;
+
+        if (d->mouse_button_down) {
+            GtkAllocation alloc;
+            gtk_widget_get_allocation(GTK_WIDGET(display), &alloc);
+            window = list->data;
+            window->x = 0;
+            window->y = 0;
+            window->width = alloc.width;
+            window->height = alloc.height;
+            region = cairo_region_create_rectangle((cairo_rectangle_int_t *)window);
+        } else {
+            region = cairo_region_create();
+            for (l = list; l != NULL; l = l->next) {
+                window = l->data;
+                window->x -= SEAMLESS_MODE_BORDER;
+                window->y -= SEAMLESS_MODE_BORDER;
+                window->width += 2 * SEAMLESS_MODE_BORDER;
+                window->height += 2 * SEAMLESS_MODE_BORDER;
+                cairo_region_union_rectangle(region, window);
+            }
+        }
+
+        gdk_window_input_shape_combine_region(gtk_widget_get_window(toplevel), region, 0, 0);
+        cairo_region_destroy(region);
+    }
+
+    g_list_free_full(list, g_free);
 }
 
 /**

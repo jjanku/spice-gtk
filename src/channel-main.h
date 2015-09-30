@@ -111,6 +111,10 @@ G_DEPRECATED_FOR(spice_main_clipboard_selection_request)
 void spice_main_clipboard_request(SpiceMainChannel *channel, guint32 type);
 #endif
 
+void spice_main_set_seamless_mode(SpiceMainChannel *channel, gboolean enabled);
+gboolean spice_main_get_seamless_mode_supported(SpiceMainChannel *channel);
+GList *spice_main_get_seamless_mode_list(SpiceMainChannel *channel);
+
 G_END_DECLS
 
 #endif /* __SPICE_CLIENT_MAIN_CHANNEL_H__ */

@@ -22,6 +22,7 @@
 #ifdef G_OS_UNIX
 #include <gio/gunixsocketaddress.h>
 #endif
+#include <spice/vd_agent.h>
 #include "common/ring.h"
 
 #include "spice-client.h"

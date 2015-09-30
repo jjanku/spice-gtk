@@ -72,6 +72,7 @@ struct _SpiceWindow {
     GtkActionGroup   *ag;
     GtkUIManager     *ui;
     bool             fullscreen;
+    bool             seamless_mode;
     bool             mouse_grabbed;
     SpiceChannel     *display_channel;
 #ifdef G_OS_WIN32
@@ -124,6 +125,7 @@ static void usb_connect_failed(GObject               *object,
                                gpointer               data);
 static gboolean is_gtk_session_property(const gchar *property);
 static void del_window(spice_connection *conn, SpiceWindow *win);
+static void window_set_seamless_mode(SpiceWindow *win, gboolean enabled);
 
 /* options */
 static gboolean fullscreen = false;
@@ -226,6 +228,7 @@ static void update_edit_menu_window(SpiceWindow *win)
 {
     int i;
     GtkAction *toggle;
+    gboolean state;
 
     if (win == NULL) {
         return;
@@ -239,6 +242,14 @@ static void update_edit_menu_window(SpiceWindow *win)
             gtk_action_set_sensitive(toggle, win->conn->agent_connected);
         }
     }
+
+    toggle = gtk_action_group_get_action(win->ag, "SeamlessMode");
+    state = spice_main_get_seamless_mode_supported(win->conn->main) &&
+            win->conn->agent_connected;
+    gtk_action_set_sensitive(toggle, state);
+
+    if (!state && win->seamless_mode)
+        window_set_seamless_mode(win, FALSE);
 }
 
 static void update_edit_menu(struct spice_connection *conn)
@@ -301,6 +312,68 @@ static void menu_cb_fullscreen(GtkAction *action, void *data)
     SpiceWindow *win = data;
 
     window_set_fullscreen(win, !win->fullscreen);
+}
+
+static void window_set_seamless_mode(SpiceWindow *win, gboolean enabled)
+{
+    gboolean state;
+    GError *error = NULL;
+
+    win->seamless_mode = enabled;
+    g_object_set(win->conn->main, "seamless-mode", win->seamless_mode, NULL);
+    spice_display_update_seamless_mode(SPICE_DISPLAY(win->spice));
+
+    gtk_window_set_decorated(GTK_WINDOW(win->toplevel), !win->seamless_mode);
+    gtk_widget_set_visible(win->menubar, !win->seamless_mode);
+    gtk_widget_set_app_paintable(win->toplevel, win->seamless_mode);
+
+    if (win->seamless_mode) {
+        gtk_window_maximize(GTK_WINDOW(win->toplevel));
+
+        gtk_widget_set_visible(win->toolbar, FALSE);
+        gtk_widget_set_visible(win->statusbar, FALSE);
+
+        g_object_set (win->spice, "grab-keyboard", FALSE, NULL);
+        g_object_set (win->spice, "resize-guest", TRUE, NULL);
+        g_object_set (win->spice, "scaling", FALSE, NULL);
+
+        spice_display_update_seamless_mode(SPICE_DISPLAY(win->spice));
+
+        gtk_window_present(GTK_WINDOW(win->toplevel));
+    } else {
+        // TODO: Restore window geometry properly
+        gtk_window_unmaximize(GTK_WINDOW(win->toplevel));
+
+        state = g_key_file_get_boolean(keyfile, "ui", "toolbar", &error);
+        gtk_widget_set_visible(win->toolbar, error ? TRUE : state);
+        g_clear_error (&error);
+
+        state = g_key_file_get_boolean(keyfile, "ui", "statusbar", &error);
+        gtk_widget_set_visible(win->statusbar, error ? TRUE : state);
+        g_clear_error (&error);
+
+        state = g_key_file_get_boolean(keyfile, "general", "grab-keyboard", &error);
+        if (!error)
+            g_object_set (win->spice, "grab-keyboard", state, NULL);
+        g_clear_error (&error);
+
+        state = g_key_file_get_boolean(keyfile, "general", "resize-guest", &error);
+        if (!error)
+            g_object_set (win->spice, "resize-guest", state, NULL);
+        g_clear_error (&error);
+
+        state = g_key_file_get_boolean(keyfile, "general", "scaling", &error);
+        if (!error)
+             g_object_set (win->spice, "scaling", state, NULL);
+        g_clear_error (&error);
+    }
+}
+
+static void menu_cb_seamless_mode(GtkAction *action, void *data)
+{
+    SpiceWindow *win = data;
+
+    window_set_seamless_mode (win, !win->seamless_mode);
 }
 
 #ifdef USE_SMARTCARD
@@ -757,6 +830,11 @@ static const GtkActionEntry entries[] = {
         .callback    = G_CALLBACK(menu_cb_resize_to),
         .accelerator = "",
     },{
+        .name        = "SeamlessMode",
+        .label       = "_Seamless mode",
+        .callback    = G_CALLBACK(menu_cb_seamless_mode),
+        .accelerator = "<control><shift>S",
+    },{
 #ifdef USE_SMARTCARD
 	.name        = "InsertSmartcard",
 	.label       = "_Insert Smartcard",
@@ -919,6 +997,7 @@ static char ui_xml[] =
 "    </menu>\n"
 "    <menu action='ViewMenu'>\n"
 "      <menuitem action='Fullscreen'/>\n"
+"      <menuitem action='SeamlessMode'/>\n"
 "      <menuitem action='Toolbar'/>\n"
 "      <menuitem action='Statusbar'/>\n"
 "    </menu>\n"
@@ -973,6 +1052,7 @@ static char ui_xml[] =
 "    <separator/>\n"
 "    <toolitem action='ResizeTo'/>\n"
 "    <separator/>\n"
+"    <toolitem action='SeamlessMode'/>\n"
 "  </toolbar>\n"
 "</ui>\n";
 
@@ -1041,6 +1121,8 @@ static SpiceWindow *create_spice_window(spice_connection *conn, SpiceChannel *ch
     GError *err = NULL;
     int i;
     SpiceGrabSequence *seq;
+    GdkScreen *screen;
+    GdkVisual *visual;
 
     win = g_object_new(SPICE_TYPE_WINDOW, NULL);
     win->id = id;
@@ -1055,6 +1137,14 @@ static SpiceWindow *create_spice_window(spice_connection *conn, SpiceChannel *ch
     } else {
         snprintf(title, sizeof(title), "%s", spicy_title);
     }
+
+    screen = gtk_widget_get_screen(win->toplevel);
+    visual = gdk_screen_get_rgba_visual(screen);
+    if (visual)
+        gtk_widget_set_visual(win->toplevel, visual);
+    else
+        // TODO: Hide seamless mode toggle
+        g_warning ("Transparency is not supported!");
 
     gtk_window_set_title(GTK_WINDOW(win->toplevel), title);
     g_signal_connect(G_OBJECT(win->toplevel), "window-state-event",

@@ -21,6 +21,7 @@
 #include <spice/vd_agent.h>
 #include <glib/gstdio.h>
 #include <glib/gi18n-lib.h>
+#include <gdk/gdk.h>
 
 #include "spice-client.h"
 #include "spice-common.h"
@@ -119,6 +120,10 @@ struct _SpiceMainChannelPrivate  {
     gboolean                    agent_volume_playback_sync;
     gboolean                    agent_volume_record_sync;
     GCancellable                *cancellable_volume_info;
+
+    GMutex                      seamless_mode_lock;
+    GList                       *seamless_mode_list;
+    gboolean                    seamless_mode;
 };
 
 struct spice_migrate {
@@ -151,6 +156,8 @@ enum {
     PROP_DISABLE_DISPLAY_POSITION,
     PROP_DISABLE_DISPLAY_ALIGN,
     PROP_MAX_CLIPBOARD,
+    PROP_SEAMLESS_MODE,
+    PROP_SEAMLESS_MODE_LIST,
 };
 
 /* Signals */
@@ -209,6 +216,8 @@ static const char *agent_msg_types[] = {
     [ VD_AGENT_CLIPBOARD_REQUEST       ] = "clipboard request",
     [ VD_AGENT_CLIPBOARD_RELEASE       ] = "clipboard release",
     [ VD_AGENT_AUDIO_VOLUME_SYNC       ] = "volume-sync",
+    [ VD_AGENT_SEAMLESS_MODE           ] = "seamless mode",
+    [ VD_AGENT_SEAMLESS_MODE_LIST      ] = "seamless mode list",
 };
 
 static const char *agent_caps[] = {
@@ -224,6 +233,7 @@ static const char *agent_caps[] = {
     [ VD_AGENT_CAP_GUEST_LINEEND_CRLF  ] = "line-end crlf",
     [ VD_AGENT_CAP_MAX_CLIPBOARD       ] = "max-clipboard",
     [ VD_AGENT_CAP_AUDIO_VOLUME_SYNC   ] = "volume-sync",
+    [ VD_AGENT_CAP_SEAMLESS_MODE       ] = "seamless mode",
     [ VD_AGENT_CAP_MONITORS_CONFIG_POSITION ] = "monitors config position",
     [ VD_AGENT_CAP_FILE_XFER_DISABLED ] = "file transfer disabled",
 };
@@ -258,6 +268,7 @@ static void spice_main_channel_init(SpiceMainChannel *channel)
     c->file_xfer_tasks = g_hash_table_new(g_direct_hash, g_direct_equal);
     c->flushing = g_hash_table_new(g_direct_hash, g_direct_equal);
     c->cancellable_volume_info = g_cancellable_new();
+    g_mutex_init(&c->seamless_mode_lock);
 
     spice_main_channel_reset_capabilties(SPICE_CHANNEL(channel));
     c->requested_mouse_mode = SPICE_MOUSE_MODE_CLIENT;
@@ -312,6 +323,12 @@ static void spice_main_get_property(GObject    *object,
     case PROP_MAX_CLIPBOARD:
         g_value_set_int(value, spice_main_get_max_clipboard(self));
         break;
+    case PROP_SEAMLESS_MODE:
+        g_value_set_boolean(value, c->seamless_mode);
+        break;
+    case PROP_SEAMLESS_MODE_LIST:
+        g_value_set_pointer(value, spice_main_get_seamless_mode_list(self));
+        break;
     default:
 	G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
 	break;
@@ -349,6 +366,9 @@ static void spice_main_set_property(GObject *gobject, guint prop_id,
     case PROP_MAX_CLIPBOARD:
         spice_main_set_max_clipboard(self, g_value_get_int(value));
         break;
+    case PROP_SEAMLESS_MODE:
+        spice_main_set_seamless_mode(self, g_value_get_boolean(value));
+        break;
     default:
 	G_OBJECT_WARN_INVALID_PROPERTY_ID(gobject, prop_id, pspec);
 	break;
@@ -379,6 +399,10 @@ static void spice_main_channel_dispose(GObject *obj)
 
     g_cancellable_cancel(c->cancellable_volume_info);
     g_clear_object(&c->cancellable_volume_info);
+
+    g_mutex_clear(&c->seamless_mode_lock);
+    g_list_free_full(c->seamless_mode_list, g_free);
+    c->seamless_mode_list = NULL;
 
     if (G_OBJECT_CLASS(spice_main_channel_parent_class)->dispose)
         G_OBJECT_CLASS(spice_main_channel_parent_class)->dispose(obj);
@@ -597,6 +621,23 @@ static void spice_main_channel_class_init(SpiceMainChannelClass *klass)
                           G_PARAM_READWRITE |
                           G_PARAM_CONSTRUCT |
                           G_PARAM_STATIC_STRINGS));
+
+    g_object_class_install_property
+        (gobject_class, PROP_SEAMLESS_MODE,
+         g_param_spec_boolean("seamless-mode",
+                              "Seamless mode",
+                              "Seamless mode",
+                              FALSE,
+                              G_PARAM_READWRITE |
+                              G_PARAM_STATIC_STRINGS));
+
+    g_object_class_install_property
+        (gobject_class, PROP_SEAMLESS_MODE_LIST,
+         g_param_spec_pointer ("seamless-mode-list",
+                               "Seamless mode list",
+                               "Seamless mode window list",
+                               G_PARAM_READABLE |
+                               G_PARAM_STATIC_STRINGS));
 
     /* TODO use notify instead */
     /**
@@ -1320,6 +1361,7 @@ static void agent_announce_caps(SpiceMainChannel *channel)
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_DISPLAY_CONFIG);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_CLIPBOARD_SELECTION);
+    VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_SEAMLESS_MODE);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_MONITORS_CONFIG_POSITION);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_FILE_XFER_DETAILED_ERRORS);
 
@@ -2051,6 +2093,30 @@ static void main_agent_handle_msg(SpiceChannel *channel,
     case VD_AGENT_FILE_XFER_STATUS:
         main_agent_handle_xfer_status(self, payload);
         break;
+    case VD_AGENT_SEAMLESS_MODE_LIST:
+    {
+        VDAgentSeamlessModeList *list = payload;
+        int i;
+
+        g_mutex_lock(&self->priv->seamless_mode_lock);
+
+        g_list_free_full(c->seamless_mode_list, g_free);
+        c->seamless_mode_list = NULL;
+
+        for (i = 0; i < list->num_of_windows; i++) {
+            VDAgentSeamlessModeWindow *win;
+
+            win = g_new0(VDAgentSeamlessModeWindow, 1);
+            memcpy(win, &(list->windows[i]), sizeof(VDAgentSeamlessModeWindow));
+
+            c->seamless_mode_list = g_list_prepend(c->seamless_mode_list, win);
+        }
+
+        g_mutex_unlock(&self->priv->seamless_mode_lock);
+
+        g_coroutine_object_notify(G_OBJECT(self), "seamless-mode-list");
+        break;
+    }
     default:
         g_warning("unhandled agent message type: %u (%s), size %u",
                   msg->type, NAME(agent_msg_types, msg->type), msg->size);
@@ -3184,4 +3250,64 @@ gboolean spice_main_file_copy_finish(SpiceMainChannel *channel,
     g_return_val_if_fail(g_task_is_valid(task, channel), FALSE);
 
     return g_task_propagate_boolean(task, error);
+}
+
+/**
+ * spice_main_set_seamless_mode:
+ * @channel: a #SpiceMainChannel
+ * @enabled: whether seamless mode is enabled
+ *
+ * Send message to agent to enable/disable seamless mode list updates.
+ **/
+void spice_main_set_seamless_mode(SpiceMainChannel *channel,
+                                  gboolean enabled)
+{
+    SpiceMainChannelPrivate *c = channel->priv;
+    VDAgentSeamlessMode msg;
+
+    g_return_if_fail(SPICE_IS_MAIN_CHANNEL(channel));
+    g_return_if_fail(spice_main_get_seamless_mode_supported(channel));
+
+    if (c->seamless_mode == enabled)
+      return;
+
+    c->seamless_mode = msg.enabled = enabled;
+    agent_msg_queue(channel, VD_AGENT_SEAMLESS_MODE, sizeof(msg), &msg);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
+
+/**
+ * spice_main_get_seamless_mode_supported:
+ * @channel: a #SpiceMainChannel
+ *
+ * Returns: %TRUE if seamless mode is supported by the agent.
+ **/
+gboolean spice_main_get_seamless_mode_supported(SpiceMainChannel *channel)
+{
+    g_return_val_if_fail(SPICE_IS_MAIN_CHANNEL(channel), FALSE);
+
+    return test_agent_cap(channel, VD_AGENT_CAP_SEAMLESS_MODE);
+}
+
+/**
+ * spice_main_get_seamless_mode_list:
+ * @channel: a #SpiceMainChannel
+ *
+ * Seamless mode has to be enabled using spice_main_set_seamless_mode() to get
+ * updated list of visible areas.
+ *
+ * Returns: (transfer full) (element-type GdkRectangle): a newly allocated
+ * list of GdkRectangle structs.
+ **/
+GList *spice_main_get_seamless_mode_list(SpiceMainChannel *channel)
+{
+    GList *list;
+
+    g_mutex_lock(&channel->priv->seamless_mode_lock);
+    list = g_list_copy_deep(channel->priv->seamless_mode_list,
+                            (GCopyFunc)g_memdup,
+                            (gpointer)sizeof(GdkRectangle));
+    g_mutex_unlock(&channel->priv->seamless_mode_lock);
+
+    return list;
 }

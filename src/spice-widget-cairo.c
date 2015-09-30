@@ -101,12 +101,27 @@ void spice_cairo_draw_event(SpiceDisplay *display, cairo_t *cr)
     /* Need to set a real solid color, because the default is usually
        transparent these days, and non-double buffered windows can't
        render transparently */
-    cairo_set_source_rgb (cr, 0, 0, 0);
+    cairo_set_source_rgba (cr, 0, 0, 0, 0);
     cairo_fill(cr);
 
     /* Draw the display */
     if (d->canvas.surface) {
+        gboolean seamless_mode;
+        GList *list, *l;
+
         cairo_translate(cr, x, y);
+
+        list = spice_main_get_seamless_mode_list(d->main);
+        g_object_get(d->main, "seamless-mode", &seamless_mode, NULL);
+        if (seamless_mode && list) {
+            for (l = list; l != NULL; l = l->next) {
+                GdkRectangle *r = l->data;
+                cairo_rectangle(cr, r->x, r->y, r->width, r->height);
+            }
+            cairo_clip(cr);
+        }
+        g_list_free_full(list, g_free);
+
         cairo_rectangle(cr, 0, 0, w, h);
         cairo_scale(cr, s, s);
         if (!d->canvas.convert)

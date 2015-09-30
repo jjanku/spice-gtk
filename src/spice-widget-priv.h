@@ -87,6 +87,7 @@ struct _SpiceDisplayPrivate {
     gboolean                allow_scaling;
     gboolean                only_downscale;
     gboolean                disable_inputs;
+    gboolean                seamless_mode;
 
     SpiceSession            *session;
     SpiceGtkSession         *gtk_session;
@@ -120,6 +121,7 @@ struct _SpiceDisplayPrivate {
     gboolean                *activeseq; /* the currently pressed keys */
     gboolean                seq_pressed;
     gboolean                keyboard_grab_released;
+    gboolean                mouse_button_down;
     gint                    mark;
 #ifdef WIN32
     HHOOK                   keyboard_hook;
