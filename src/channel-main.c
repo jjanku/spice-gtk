@@ -1152,6 +1152,21 @@ gboolean spice_main_send_monitor_config(SpiceMainChannel *channel)
     return TRUE;
 }
 
+void spice_main_agent_set_volume(SpiceMainChannel *main_channel, gboolean playback, uint16_t volume)
+{
+    g_warning("%u", volume);
+    VDAgentAudioVolumeSync *avs = g_malloc0(sizeof(VDAgentAudioVolumeSync) + 2 * sizeof(uint16_t));
+    avs->is_playback = playback;
+    avs->mute = volume == 0;
+    avs->nchannels = 2;
+    avs->volume[0] = volume;
+    avs->volume[1] = volume;
+    
+    agent_msg_queue(main_channel, VD_AGENT_AUDIO_VOLUME_SYNC,
+                    sizeof(VDAgentAudioVolumeSync) + 2 * sizeof(uint16_t), avs);
+    g_free(avs);
+}
+
 static SpiceAudio *spice_main_get_audio(const SpiceMainChannel *channel)
 {
     return spice_audio_get(spice_channel_get_session(SPICE_CHANNEL(channel)), NULL);
@@ -1188,7 +1203,7 @@ static void audio_playback_volume_info_cb(GObject *object, GAsyncResult *res, gp
     avs->nchannels = nchannels;
     memcpy(avs->volume, volume, array_size);
 
-    SPICE_DEBUG("%s mute=%s nchannels=%u volume[0]=%u",
+    g_warning("%s mute=%s nchannels=%u volume[0]=%u",
                 __func__, spice_yes_no(mute), nchannels, volume[0]);
     g_free(volume);
     agent_msg_queue(main_channel, VD_AGENT_AUDIO_VOLUME_SYNC,

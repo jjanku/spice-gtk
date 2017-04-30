@@ -100,6 +100,8 @@ gboolean spice_main_file_copy_finish(SpiceMainChannel *channel,
 
 void spice_main_request_mouse_mode(SpiceMainChannel *channel, int mode);
 
+void spice_main_agent_set_volume(SpiceMainChannel *main_channel, gboolean playback, uint16_t volume);
+
 #ifndef SPICE_DISABLE_DEPRECATED
 SPICE_DEPRECATED_FOR(spice_main_clipboard_selection_grab)
 void spice_main_clipboard_grab(SpiceMainChannel *channel, guint32 *types, int ntypes);

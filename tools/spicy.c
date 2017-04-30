@@ -1028,6 +1028,12 @@ spice_window_init (SpiceWindow *self)
 {
 }
 
+static void volume_slider_changed_cb (GtkScaleButton *slider, gdouble value, gpointer data)
+{
+    spice_connection *conn = data;
+    spice_main_agent_set_volume(conn->main, TRUE, G_MAXUINT16 * value);
+}
+
 static SpiceWindow *create_spice_window(spice_connection *conn, SpiceChannel *channel, int id, gint monitor_id)
 {
     char title[32];
@@ -1094,6 +1100,12 @@ static SpiceWindow *create_spice_window(spice_connection *conn, SpiceChannel *ch
     }
     win->menubar = gtk_ui_manager_get_widget(win->ui, "/MainMenu");
     win->toolbar = gtk_ui_manager_get_widget(win->ui, "/ToolBar");
+
+    GtkWidget *volume_slider = gtk_volume_button_new();
+    GtkToolItem *volume_item = gtk_tool_item_new();
+    gtk_container_add((GtkContainer *) volume_item, volume_slider);
+    gtk_toolbar_insert((GtkToolbar *) (win->toolbar), volume_item, -1);
+    g_signal_connect(volume_slider, "value-changed", G_CALLBACK(volume_slider_changed_cb), conn);
 
     /* recent menu */
     win->ritem  = gtk_ui_manager_get_widget
