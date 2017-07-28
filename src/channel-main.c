@@ -2117,6 +2117,38 @@ static void main_agent_handle_msg(SpiceChannel *channel,
         g_coroutine_object_notify(G_OBJECT(self), "seamless-mode-list");
         break;
     }
+    case VD_AGENT_SEAMLESS_MODE_CHANGE:
+    {
+        VDAgentSeamlessModeWindow *win = payload, *win_cpy;
+        GList *list;
+
+        for (list = c->seamless_mode_list; list != NULL; list = list->next) {
+            win_cpy = list->data;
+            if (win_cpy->id == win->id) {
+                g_mutex_lock(&self->priv->seamless_mode_lock);
+                if (win->w == 0) {
+                    c->seamless_mode_list = g_list_remove(c->seamless_mode_list, win_cpy);
+                    goto seamless_notify;
+                }
+                memcpy(win_cpy, win, sizeof(VDAgentSeamlessModeWindow));
+                goto seamless_notify;
+            }
+        }
+
+        if (win->w == 0)
+            break;
+
+        g_mutex_lock(&self->priv->seamless_mode_lock);
+        win_cpy = g_new0(VDAgentSeamlessModeWindow, 1);
+        memcpy(win_cpy, win, sizeof(VDAgentSeamlessModeWindow));
+        c->seamless_mode_list = g_list_prepend(c->seamless_mode_list, win_cpy);
+
+    seamless_notify:
+        g_mutex_unlock(&self->priv->seamless_mode_lock);
+
+        g_coroutine_object_notify(G_OBJECT(self), "seamless-mode-list");
+        break;
+    }
     default:
         g_warning("unhandled agent message type: %u (%s), size %u",
                   msg->type, NAME(agent_msg_types, msg->type), msg->size);
