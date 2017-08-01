@@ -114,6 +114,7 @@ void spice_main_clipboard_request(SpiceMainChannel *channel, guint32 type);
 void spice_main_set_seamless_mode(SpiceMainChannel *channel, gboolean enabled);
 gboolean spice_main_get_seamless_mode_supported(SpiceMainChannel *channel);
 GList *spice_main_get_seamless_mode_list(SpiceMainChannel *channel);
+GList *spice_main_get_seamless_mode_list_old(SpiceMainChannel *channel);
 
 G_END_DECLS
 

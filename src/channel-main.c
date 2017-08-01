@@ -123,6 +123,7 @@ struct _SpiceMainChannelPrivate  {
 
     GMutex                      seamless_mode_lock;
     GList                       *seamless_mode_list;
+    GList                       *seamless_mode_list_old;
     gboolean                    seamless_mode;
 };
 
@@ -402,7 +403,9 @@ static void spice_main_channel_dispose(GObject *obj)
 
     g_mutex_clear(&c->seamless_mode_lock);
     g_list_free_full(c->seamless_mode_list, g_free);
+    g_list_free_full(c->seamless_mode_list_old, g_free);
     c->seamless_mode_list = NULL;
+    c->seamless_mode_list_old = NULL;
 
     if (G_OBJECT_CLASS(spice_main_channel_parent_class)->dispose)
         G_OBJECT_CLASS(spice_main_channel_parent_class)->dispose(obj);
@@ -2100,7 +2103,8 @@ static void main_agent_handle_msg(SpiceChannel *channel,
 
         g_mutex_lock(&self->priv->seamless_mode_lock);
 
-        g_list_free_full(c->seamless_mode_list, g_free);
+        c->seamless_mode_list_old = g_list_concat(c->seamless_mode_list_old,
+                                                  c->seamless_mode_list);
         c->seamless_mode_list = NULL;
 
         for (i = 0; i < list->num_of_windows; i++) {
@@ -2126,11 +2130,19 @@ static void main_agent_handle_msg(SpiceChannel *channel,
             win_cpy = list->data;
             if (win_cpy->id == win->id) {
                 g_mutex_lock(&self->priv->seamless_mode_lock);
+
                 if (win->w == 0) {
-                    c->seamless_mode_list = g_list_remove(c->seamless_mode_list, win_cpy);
+                    c->seamless_mode_list = g_list_remove_link(c->seamless_mode_list, list);
+                    c->seamless_mode_list_old = g_list_prepend(c->seamless_mode_list_old, win_cpy);
+                    g_list_free(list);
                     goto seamless_notify;
                 }
-                memcpy(win_cpy, win, sizeof(VDAgentSeamlessModeWindow));
+
+                win = g_new0(VDAgentSeamlessModeWindow, 1);
+                memcpy(win, win_cpy, sizeof(VDAgentSeamlessModeWindow));
+                c->seamless_mode_list_old = g_list_prepend(c->seamless_mode_list_old, win);
+
+                memcpy(win_cpy, payload, sizeof(VDAgentSeamlessModeWindow));
                 goto seamless_notify;
             }
         }
@@ -3339,6 +3351,33 @@ GList *spice_main_get_seamless_mode_list(SpiceMainChannel *channel)
     list = g_list_copy_deep(channel->priv->seamless_mode_list,
                             (GCopyFunc)g_memdup,
                             (gpointer)sizeof(GdkRectangle));
+    g_mutex_unlock(&channel->priv->seamless_mode_lock);
+
+    return list;
+}
+
+/**
+ * spice_main_get_seamless_mode_list_old:
+ * @channel: a #SpiceMainChannel
+ *
+ * Returned list contains old coordinates of windows
+ * that have changed their position since the last call
+ * to this function().
+ *
+ * Returns: (transfer full) (element-type GdkRectangle): a newly allocated
+ * list of GdkRectangle structs.
+ **/
+GList *spice_main_get_seamless_mode_list_old(SpiceMainChannel *channel)
+{
+    GList *list;
+
+    g_mutex_lock(&channel->priv->seamless_mode_lock);
+    list = g_list_copy_deep(channel->priv->seamless_mode_list_old,
+                            (GCopyFunc)g_memdup,
+                            (gpointer)sizeof(GdkRectangle));
+
+    g_list_free_full(channel->priv->seamless_mode_list_old, g_free);
+    channel->priv->seamless_mode_list_old = NULL;
     g_mutex_unlock(&channel->priv->seamless_mode_lock);
 
     return list;

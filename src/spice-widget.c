@@ -3146,7 +3146,7 @@ void spice_display_update_seamless_mode(SpiceDisplay *display)
 {
     SpiceDisplayPrivate *d = display->priv;
     GtkWidget *toplevel = NULL;
-    GList *l = NULL, *list = NULL;
+    GList *l = NULL, *list = NULL, *list_old = NULL;
     cairo_region_t *region = NULL;
     gboolean enabled;
 
@@ -3160,6 +3160,18 @@ void spice_display_update_seamless_mode(SpiceDisplay *display)
     }
 
     list = spice_main_get_seamless_mode_list(d->main);
+    list_old = spice_main_get_seamless_mode_list_old(d->main);
+
+    if (list != NULL || list_old != NULL) {
+        region = cairo_region_create();
+        for (l = list_old; l != NULL; l = l->next)
+            cairo_region_union_rectangle(region, (GdkRectangle *)(l->data));
+        for (l = list; l != NULL; l = l->next)
+            cairo_region_union_rectangle(region, (GdkRectangle *)(l->data));
+
+        gdk_window_invalidate_region(gtk_widget_get_window(GTK_WIDGET(display)), region, FALSE);
+        cairo_region_destroy(region);
+    }
 
     if (list != NULL) {
         GdkRectangle *window;
@@ -3190,6 +3202,7 @@ void spice_display_update_seamless_mode(SpiceDisplay *display)
     }
 
     g_list_free_full(list, g_free);
+    g_list_free_full(list_old, g_free);
 }
 
 /**
