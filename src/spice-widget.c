@@ -123,7 +123,6 @@ static void size_allocate(GtkWidget *widget, GtkAllocation *conf, gpointer data)
 static gboolean draw_event(GtkWidget *widget, cairo_t *cr, gpointer data);
 static void update_size_request(SpiceDisplay *display);
 static GdkDevice *spice_gdk_window_get_pointing_device(GdkWindow *window);
-static gboolean draw_seamless(GtkWidget *widget, GdkEventExpose *event, gpointer userdata);
 static void main_seamless_mode_update(SpiceChannel *channel, GParamSpec *pspec, SpiceDisplay *display);
 static void set_seamless_mode(SpiceChannel *channel, GParamSpec *pspec, SpiceDisplay *display);
 
@@ -3079,22 +3078,6 @@ static void channel_destroy(SpiceSession *s, SpiceChannel *channel, gpointer dat
     return;
 }
 
-static gboolean draw_seamless(GtkWidget *widget, GdkEventExpose *event, gpointer userdata)
-{
-    cairo_t *cr;
-
-    cr = gdk_cairo_create(gtk_widget_get_window(widget));
-
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.0);
-
-    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-    cairo_paint(cr);
-
-    cairo_destroy(cr);
-
-    return FALSE;
-}
-
 static void main_seamless_mode_update(SpiceChannel *channel,
                                       GParamSpec *pspec,
                                       SpiceDisplay *display)
@@ -3110,23 +3093,12 @@ static void set_seamless_mode(SpiceChannel *channel,
     g_object_get(display->priv->main, "seamless-mode", &enabled, NULL);
 
     if (enabled)
-    {
-        GtkWidget *toplevel = gtk_widget_get_toplevel(GTK_WIDGET(display));
-
-        g_signal_connect(G_OBJECT(toplevel), "draw",
-                         G_CALLBACK(draw_seamless), NULL);
-
         g_signal_connect(display->priv->main, "notify::seamless-mode-list",
                          G_CALLBACK(main_seamless_mode_update), display);
-    } else {
-        g_signal_handlers_disconnect_by_func(display->priv->main,
-                                             G_CALLBACK(draw_seamless),
-                                             NULL);
-
+    else
         g_signal_handlers_disconnect_by_func(display->priv->main,
                                              G_CALLBACK(main_seamless_mode_update),
                                              display);
-    }
 }
 
 /**
