@@ -151,6 +151,9 @@ struct _SpiceDisplayPrivate {
         SpiceGlScanout      scanout;
     } egl;
 #endif // HAVE_EGL
+
+    GdkDragContext          *drag_context;
+    gboolean                drag_ongoing;
 };
 
 int      spice_cairo_image_create                 (SpiceDisplay *display);
@@ -173,6 +176,9 @@ void     spice_egl_cursor_set                (SpiceDisplay *display);
 void     spice_display_widget_gl_scanout     (SpiceDisplay *display);
 #endif
 void     spice_display_widget_update_monitor_area(SpiceDisplay *display);
+
+int button_gdk_to_spice(guint gdk);
+int button_mask_gdk_to_spice(int gdk);
 
 G_END_DECLS
 

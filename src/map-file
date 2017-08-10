@@ -112,6 +112,7 @@ spice_main_selection_grab;
 spice_main_selection_request;
 spice_main_selection_send_data;
 spice_main_selection_release;
+spice_main_drag_mouse_leave;
 spice_playback_channel_get_type;
 spice_playback_channel_set_delay;
 spice_port_channel_event;

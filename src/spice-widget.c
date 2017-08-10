@@ -38,6 +38,7 @@
 #endif
 #endif
 
+#include <spice/vd_agent.h>
 #include "spice-widget.h"
 #include "spice-widget-priv.h"
 #include "spice-gtk-session-priv.h"
@@ -118,8 +119,13 @@ static void update_area(SpiceDisplay *display, gint x, gint y, gint width, gint 
 static void release_keys(SpiceDisplay *display);
 static void size_allocate(GtkWidget *widget, GtkAllocation *conf, gpointer data);
 static gboolean draw_event(GtkWidget *widget, cairo_t *cr, gpointer data);
+static gboolean motion_event(GtkWidget *widget, GdkEventMotion *motion);
 static void update_size_request(SpiceDisplay *display);
 static GdkDevice *spice_gdk_window_get_pointing_device(GdkWindow *window);
+static gboolean do_pointer_grab(SpiceDisplay *display);
+static GdkSeat *spice_display_get_default_seat(SpiceDisplay *display);
+static void update_mouse_pointer(SpiceDisplay *display);
+static void cursor_reset(SpiceCursorChannel *channel, gpointer data);
 
 /* ---------------------------------------------------------------- */
 
@@ -524,14 +530,52 @@ static void file_transfer_callback(GObject *source_object,
     g_clear_error(&error);
 }
 
-static void drag_data_received_callback(SpiceDisplay *self,
-                                        GdkDragContext *drag_context,
-                                        gint x,
-                                        gint y,
-                                        GtkSelectionData *data,
-                                        guint info,
-                                        guint time,
-                                        gpointer *user_data)
+static void drag_selection_request_cb(SpiceMainChannel *main,
+                                      guint selection,
+                                      gchar *type,
+                                      gpointer user_data)
+{
+    g_return_if_fail(SPICE_IS_DISPLAY(user_data));
+    g_return_if_fail(selection == VD_AGENT_DND_SELECTION);
+
+    SpiceDisplay *display = user_data;
+    SpiceDisplayPrivate *d = display->priv;
+    gtk_drag_get_data(GTK_WIDGET(display), d->drag_context,
+                      gdk_atom_intern(type, FALSE), GDK_CURRENT_TIME);
+}
+
+static void drag_begin_remote_cb(SpiceMainChannel *main,
+                                 gboolean success,
+                                 gpointer user_data)
+{
+    g_return_if_fail(SPICE_IS_DISPLAY(user_data));
+    SpiceDisplay *display = user_data;
+    SpiceDisplayPrivate *d = display->priv;
+
+    d->drag_ongoing = success;
+    if (success) {
+        g_signal_connect(d->main, "main-selection-request",
+                         G_CALLBACK(drag_selection_request_cb),
+                         display);
+
+        if (d->mouse_mode != SPICE_MOUSE_MODE_CLIENT) {
+            g_debug("dnd: mouse mode set to SPICE_MOUSE_MODE_SERVER, "
+                    "unable to pass motion events, "
+                    "requesting SPICE_MOUSE_MODE_CLIENT");
+            spice_main_request_mouse_mode(d->main, SPICE_MOUSE_MODE_CLIENT);
+        }
+    }
+    g_warning("drag begin remote %d", success);
+}
+
+static void drag_data_received_cb(SpiceDisplay *self,
+                                  GdkDragContext *drag_context,
+                                  gint x,
+                                  gint y,
+                                  GtkSelectionData *data,
+                                  guint info,
+                                  guint time,
+                                  gpointer *user_data)
 {
     const guchar *buf;
     gchar **file_urls;
@@ -539,6 +583,19 @@ static void drag_data_received_callback(SpiceDisplay *self,
     SpiceDisplayPrivate *d = self->priv;
     int i = 0;
     GFile **files;
+
+    /* TEXT: get UTF8-encoded string with gtk_selection_data_get_text()
+     * agent: use gtk_selection_data_set_text() to fill GtkSelectionData
+     *
+     * IMAGE: get data with gtk_selection_data_get_data()
+     * agent: recreate GdkPixbuf from data
+     * (see gtk_selection_data_get_pixbuf() for reference impl)
+     * use gtk_selection_data_set_pixbuf() to fill GtkSelectionData
+     */
+    spice_main_selection_send_data(d->main, VD_AGENT_DND_SELECTION,
+                                   gtk_selection_data_get_data(data),
+                                   gtk_selection_data_get_length(data));
+    return;
 
     /* We get a buf like:
      * file:///root/a.txt\r\nfile:///root/b.txt\r\n
@@ -563,6 +620,115 @@ static void drag_data_received_callback(SpiceDisplay *self,
     g_free(files);
 
     gtk_drag_finish(drag_context, TRUE, FALSE, time);
+}
+
+static gboolean drag_motion_cb(GtkWidget      *widget,
+                               GdkDragContext *drag_context,
+                               gint            x,
+                               gint            y,
+                               guint           time,
+                               gpointer        user_data)
+{
+    SpiceDisplay *display = SPICE_DISPLAY(widget);
+    SpiceDisplayPrivate *d = display->priv;
+    GdkDragContext *source_context;
+    source_context = spice_gtk_session_get_drag_source_context(d->gtk_session);
+
+    gdk_drag_status(drag_context, d->drag_ongoing ? GDK_ACTION_COPY : 0, time);
+
+    if (!d->drag_context) {
+        d->drag_context = drag_context;
+        if (!source_context) {
+            GList *l;
+            gsize len, i;
+            GStrv targets;
+
+            l = gdk_drag_context_list_targets(drag_context);
+            len = g_list_length(l);
+            g_return_val_if_fail(len > 0, FALSE);
+
+            targets = g_new(gchar *, len + 1);
+            targets[len] = NULL;
+            for (i = 0; l; l = l->next, i++)
+                targets[i] = gdk_atom_name(l->data);
+
+            g_signal_connect(d->main, "main-dnd-begin-remote",
+                             G_CALLBACK(drag_begin_remote_cb), display);
+            spice_main_selection_grab(d->main, VD_AGENT_DND_SELECTION, (const gchar **)targets);
+            g_strfreev(targets);
+            return TRUE;
+        } else {
+            if (spice_gtk_session_cancel_drag(widget))
+                return TRUE;
+            else
+                // avoid animation of icon returning to starting point of drag
+                // when releasing the button on SpiceDisplay
+                gdk_drag_status(drag_context, GDK_ACTION_COPY, time);
+        }
+    }
+
+    /*
+    if (source_context) {
+        GdkCursor *blank = spice_display_get_blank_cursor(display);
+        GdkSeat *seat = spice_display_get_default_seat(display);
+        gdk_seat_grab(seat, gtk_widget_get_window(widget),
+                      GDK_SEAT_CAPABILITY_ALL_POINTING,
+                      TRUE, blank, NULL, NULL, NULL);
+        g_clear_object(&blank);
+        gtk_drag_set_icon_pixbuf(source_context, d->mouse_pixbuf, 0, 0);
+    }
+    */
+
+    if (!d->drag_ongoing && !source_context)
+        return TRUE;
+
+    GdkEvent *event = gdk_event_new(GDK_MOTION_NOTIFY);
+    event->motion.x = x;
+    event->motion.y = y;
+    event->motion.state = spice_gtk_session_get_drag_button_state(d->gtk_session);
+    motion_event(widget, (GdkEventMotion *)event);
+    gdk_event_free(event);
+
+    return TRUE;
+}
+
+static void drag_leave_cb(GtkWidget      *widget,
+                          GdkDragContext *drag_context,
+                          guint           time,
+                          gpointer        user_data)
+{
+    SpiceDisplay *display = SPICE_DISPLAY(widget);
+    SpiceDisplayPrivate *d = display->priv;
+
+    g_warn_if_fail(drag_context == d->drag_context);
+    d->drag_context = NULL;
+
+    // cancel dnd on remote side
+    if (!spice_gtk_session_get_drag_source_context(d->gtk_session))
+        spice_main_selection_release(d->main, VD_AGENT_DND_SELECTION);
+
+    g_signal_handlers_disconnect_by_func(d->main,
+                                         G_CALLBACK(drag_selection_request_cb),
+                                         display);
+    // don't listen for responses to VD_AGENT_DND_BEGIN msg
+    // that wasn't sent by this SpiceDisplay
+    g_signal_handlers_disconnect_by_func(d->main,
+                                         G_CALLBACK(drag_begin_remote_cb),
+                                         display);
+
+    d->drag_ongoing = FALSE;
+}
+
+static gboolean drag_drop_cb(GtkWidget      *widget,
+                             GdkDragContext *context,
+                             gint            x,
+                             gint            y,
+                             guint           time,
+                             gpointer        user_data)
+{
+    // FIXME: pass real result
+    gtk_drag_finish(context, TRUE, FALSE, time);
+    return TRUE;
 }
 
 static void grab_notify(SpiceDisplay *display, gboolean was_grabbed)
@@ -630,7 +796,6 @@ static void spice_display_init(SpiceDisplay *display)
     GtkWidget *widget = GTK_WIDGET(display);
     GtkWidget *area;
     SpiceDisplayPrivate *d;
-    GtkTargetEntry targets = { "text/uri-list", 0, 0 };
 
     d = display->priv = SPICE_DISPLAY_GET_PRIVATE(display);
     d->stack = GTK_STACK(gtk_stack_new());
@@ -665,9 +830,19 @@ G_GNUC_END_IGNORE_DEPRECATIONS
     g_signal_connect(display, "grab-broken-event", G_CALLBACK(grab_broken), NULL);
     g_signal_connect(display, "grab-notify", G_CALLBACK(grab_notify), NULL);
 
-    gtk_drag_dest_set(widget, GTK_DEST_DEFAULT_ALL, &targets, 1, GDK_ACTION_COPY);
-    g_signal_connect(display, "drag-data-received",
-                     G_CALLBACK(drag_data_received_callback), NULL);
+    gtk_drag_dest_set(widget, 0, NULL, 0, GDK_ACTION_COPY);
+    /* GtkTargetList *targets;
+    targets = gtk_target_list_new(NULL, 0);
+    gtk_target_list_add_uri_targets(targets, DND_TARGETS_URI);
+    gtk_target_list_add_image_targets(targets, DND_TARGETS_IMAGE, FALSE);
+    gtk_target_list_add_text_targets(targets, DND_TARGETS_TEXT);
+    gtk_drag_dest_set_target_list(widget, targets);
+    gtk_target_list_unref(targets); */
+    g_signal_connect(display, "drag-data-received", G_CALLBACK(drag_data_received_cb), NULL);
+    g_signal_connect(display, "drag-drop", G_CALLBACK(drag_drop_cb), NULL);
+    g_signal_connect(display, "drag-motion", G_CALLBACK(drag_motion_cb), NULL);
+    g_signal_connect(display, "drag-leave", G_CALLBACK(drag_leave_cb), NULL);
+
     g_signal_connect(display, "size-allocate", G_CALLBACK(size_allocate), NULL);
 
     gtk_widget_add_events(widget,
@@ -1809,7 +1984,7 @@ static gboolean enter_event(GtkWidget *widget, GdkEventCrossing *crossing G_GNUC
     return true;
 }
 
-static gboolean leave_event(GtkWidget *widget, GdkEventCrossing *crossing G_GNUC_UNUSED)
+static gboolean leave_event(GtkWidget *widget, GdkEventCrossing *crossing)
 {
     SpiceDisplay *display = SPICE_DISPLAY(widget);
     SpiceDisplayPrivate *d = display->priv;
@@ -1822,6 +1997,11 @@ static gboolean leave_event(GtkWidget *widget, GdkEventCrossing *crossing G_GNUC
     d->mouse_have_pointer = false;
     spice_gtk_session_set_mouse_has_pointer(d->gtk_session, false);
     try_keyboard_ungrab(display);
+
+    if (crossing->state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK)) {
+        //ask vdagent if dnd should be initiated
+        spice_main_drag_mouse_leave(d->main);
+    }
 
     return true;
 }
@@ -1886,7 +2066,7 @@ static gboolean focus_out_event(GtkWidget *widget, GdkEventFocus *focus G_GNUC_U
     return true;
 }
 
-static int button_gdk_to_spice(guint gdk)
+int button_gdk_to_spice(guint gdk)
 {
     static const int map[] = {
         [ 1 ] = SPICE_MOUSE_BUTTON_LEFT,
@@ -1902,7 +2082,7 @@ static int button_gdk_to_spice(guint gdk)
     return 0;
 }
 
-static int button_mask_gdk_to_spice(int gdk)
+int button_mask_gdk_to_spice(int gdk)
 {
     int spice = 0;
 
@@ -2044,7 +2224,8 @@ static gboolean button_event(GtkWidget *widget, GdkEventButton *button)
         return true;
 
     transform_input(display, button->x, button->y, &x, &y);
-    if ((x < 0 || x >= d->area.width ||
+    if (!button->send_event &&
+        (x < 0 || x >= d->area.width ||
          y < 0 || y >= d->area.height) &&
         d->mouse_mode == SPICE_MOUSE_MODE_CLIENT) {
         /* rule out clicks in outside region */
@@ -2075,6 +2256,8 @@ static gboolean button_event(GtkWidget *widget, GdkEventButton *button)
 
     if (!d->inputs)
         return true;
+
+    spice_gtk_session_button_event(d->gtk_session, button);
 
     switch (button->type) {
     case GDK_BUTTON_PRESS:

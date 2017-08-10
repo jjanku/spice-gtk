@@ -148,6 +148,10 @@ G_DEPRECATED_FOR(spice_main_channel_request_mouse_mode)
 void spice_main_request_mouse_mode(SpiceMainChannel *channel, int mode);
 #endif
 
+void spice_main_drag_begin(SpiceMainChannel *channel);
+void spice_main_drag_end(SpiceMainChannel *channel);
+void spice_main_drag_mouse_leave(SpiceMainChannel *channel);
+
 void spice_main_selection_grab(SpiceMainChannel *channel, guint selection, const gchar **types);
 gboolean spice_main_selection_request(SpiceMainChannel *channel, guint selection, const gchar *name);
 void spice_main_selection_send_data(SpiceMainChannel *channel, guint selection,

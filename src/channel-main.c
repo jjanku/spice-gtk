@@ -171,6 +171,7 @@ enum {
     SPICE_MAIN_SELECTION_REQUEST,
     SPICE_MAIN_SELECTION_DATA,
     SPICE_MAIN_SELECTION_RELEASE,
+    SPICE_MAIN_DND_BEGIN_REMOTE,
     SPICE_MAIN_LAST_SIGNAL,
 };
 
@@ -898,6 +899,19 @@ static void spice_main_channel_class_init(SpiceMainChannelClass *klass)
                      G_TYPE_NONE,
                      1,
                      G_TYPE_UINT);
+
+    /* This signal is emitted as a response to
+     * spice_main_selection_grab(,VD_AGENT_DND_SELECTION,).
+     */
+    signals[SPICE_MAIN_DND_BEGIN_REMOTE] =
+    g_signal_new("main-dnd-begin-remote",
+                 G_OBJECT_CLASS_TYPE(gobject_class),
+                 G_SIGNAL_RUN_LAST,
+                 0,
+                 NULL, NULL,
+                 g_cclosure_marshal_VOID__BOOLEAN,
+                 G_TYPE_NONE,
+                 1, G_TYPE_BOOLEAN);
 
     g_type_class_add_private(klass, sizeof(SpiceMainChannelPrivate));
     channel_set_handlers(SPICE_CHANNEL_CLASS(klass));
@@ -2199,6 +2213,17 @@ static void main_agent_handle_msg(SpiceChannel *channel,
     {
         VDAgentSelectionRelease *sel = payload;
         g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_RELEASE], 0, sel->selection);
+        break;
+    }
+    case VD_AGENT_DND_STATUS: {
+        VDAgentDNDStatusMessage *msg = payload;
+        if (msg->status == VD_AGENT_DND_STATUS_BEGIN_SUCCESS) {
+            g_coroutine_signal_emit(self, signals[SPICE_MAIN_DND_BEGIN_REMOTE], 0, true);
+        } else if (msg->status == VD_AGENT_DND_STATUS_BEGIN_ERROR) {
+            g_coroutine_signal_emit(self, signals[SPICE_MAIN_DND_BEGIN_REMOTE], 0, false);
+            g_warning("Remote DND begin failed.");
+        }
+
         break;
     }
     default:
@@ -3532,16 +3557,20 @@ static gboolean main_selection_params_valid(SpiceMainChannel *channel, guint sel
     g_return_val_if_fail(channel != NULL, FALSE);
     g_return_val_if_fail(SPICE_IS_MAIN_CHANNEL(channel), FALSE);
     g_return_val_if_fail(test_agent_cap(channel, VD_AGENT_CAP_SELECTION_DATA), FALSE);
-    g_return_val_if_fail(selection <= VD_AGENT_CLIPBOARD_SELECTION_SECONDARY, FALSE);
+    g_return_val_if_fail(selection <= VD_AGENT_DND_SELECTION, FALSE);
 
     c = channel->priv;
     if (!c->agent_connected)
         return FALSE;
 
-    g_return_val_if_fail(test_agent_cap(channel, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND), FALSE);
-    if (selection != VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD &&
-        !test_agent_cap(channel, VD_AGENT_CAP_CLIPBOARD_SELECTION))
-        return FALSE;
+    if (selection == VD_AGENT_DND_SELECTION) {
+
+    } else {
+        g_return_val_if_fail(test_agent_cap(channel, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND), FALSE);
+        if (selection != VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD &&
+            !test_agent_cap(channel, VD_AGENT_CAP_CLIPBOARD_SELECTION))
+            return FALSE;
+    }
 
     return TRUE;
 }
@@ -3607,5 +3636,18 @@ void spice_main_selection_release(SpiceMainChannel *channel, guint selection)
 
     msg.selection = selection;
     agent_msg_queue(channel, VD_AGENT_SELECTION_RELEASE, sizeof(msg), &msg);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
+
+void spice_main_drag_mouse_leave(SpiceMainChannel *channel)
+{
+    VDAgentDNDStatusMessage msg;
+
+    g_return_if_fail(channel != NULL);
+    g_return_if_fail(SPICE_IS_MAIN_CHANNEL(channel));
+
+    g_warning("sending VD_AGENT_DND_STATUS_MOUSE_LEAVE");
+    msg.status = VD_AGENT_DND_STATUS_MOUSE_LEAVE;
+    agent_msg_queue(channel, VD_AGENT_DND_STATUS, sizeof(msg), &msg);
     spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
 }
