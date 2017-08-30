@@ -3408,3 +3408,88 @@ gboolean spice_main_channel_file_copy_finish(SpiceMainChannel *channel,
 
     return g_task_propagate_boolean(task, error);
 }
+
+static gboolean main_selection_params_valid(SpiceMainChannel *channel, guint selection)
+{
+    SpiceMainChannelPrivate *c;
+
+    g_return_val_if_fail(channel != NULL, FALSE);
+    g_return_val_if_fail(SPICE_IS_MAIN_CHANNEL(channel), FALSE);
+    g_return_val_if_fail(test_agent_cap(channel, VD_AGENT_CAP_SELECTION_DATA), FALSE);
+    g_return_val_if_fail(selection <= VD_AGENT_CLIPBOARD_SELECTION_SECONDARY, FALSE);
+
+    c = channel->priv;
+    if (!c->agent_connected)
+        return FALSE;
+
+    g_return_val_if_fail(test_agent_cap(channel, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND), FALSE);
+    if (selection != VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD &&
+        !test_agent_cap(channel, VD_AGENT_CAP_CLIPBOARD_SELECTION))
+        return FALSE;
+
+    return TRUE;
+}
+
+void spice_main_selection_grab(SpiceMainChannel *channel, guint selection, const gchar **types)
+{
+    VDAgentSelectionGrab *msg;
+    gchar *dest;
+    guint size = 0, i = 0;
+
+    if (!main_selection_params_valid(channel, selection))
+        return;
+
+    size = sizeof(VDAgentSelectionGrab);
+    for (i = 0; types[i]; i++)
+        size += strlen(types[i]) + 1;
+
+    msg = g_malloc(size);
+    dest = (gchar *)msg->types;
+    msg->selection = selection;
+    for (i = 0; types[i]; i++)
+        strcpy(dest, types[i]);
+
+    agent_msg_queue(channel, VD_AGENT_SELECTION_GRAB, size, msg);
+    g_free(msg);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
+
+gboolean spice_main_selection_request(SpiceMainChannel *channel, guint selection, const gchar *name)
+{
+    VDAgentSelectionRequest msg;
+
+    if (!main_selection_params_valid(channel, selection))
+        return FALSE;
+
+    msg.selection = selection;
+    agent_msg_queue_many(channel, VD_AGENT_SELECTION_REQUEST,
+                         &msg, sizeof(msg), name, strlen(name) + 1, NULL);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+    return TRUE;
+}
+
+void spice_main_selection_send_data(SpiceMainChannel *channel, guint selection,
+                                    const guchar *data, size_t size)
+{
+    VDAgentSelectionData msg;
+
+    if (!main_selection_params_valid(channel, selection))
+        return;
+
+    msg.selection = selection;
+    agent_msg_queue_many(channel, VD_AGENT_SELECTION_DATA,
+                         &msg, sizeof(msg), data, size, NULL);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
+
+void spice_main_selection_release(SpiceMainChannel *channel, guint selection)
+{
+    VDAgentSelectionRelease msg;
+
+    if (!main_selection_params_valid(channel, selection))
+        return;
+
+    msg.selection = selection;
+    agent_msg_queue(channel, VD_AGENT_SELECTION_RELEASE, sizeof(msg), &msg);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
