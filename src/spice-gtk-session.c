@@ -98,6 +98,9 @@ struct _SpiceGtkSessionPrivate {
 static void clipboard_owner_change(GtkClipboard *clipboard,
                                    GdkEventOwnerChange *event,
                                    gpointer user_data);
+static void clipboard_got_from_guest(SpiceMainChannel *main, guint selection,
+                                     guint type, const guchar *data, guint size,
+                                     gpointer user_data);
 static void channel_new(SpiceSession *session, SpiceChannel *channel,
                         gpointer user_data);
 static void channel_destroy(SpiceSession *session, SpiceChannel *channel,
@@ -492,7 +495,7 @@ static void spice_gtk_session_class_init(SpiceGtkSessionClass *klass)
 }
 
 /* ---------------------------------------------------------------- */
-/* private functions (clipboard related)                            */
+/* private functions (clipboard, selection related)                 */
 
 static GtkClipboard* get_clipboard_from_selection(SpiceGtkSessionPrivate *s,
                                                   guint selection)
@@ -711,6 +714,7 @@ typedef struct
     GMainLoop *loop;
     GtkSelectionData *selection_data;
     guint info;
+    GdkAtom type;
     guint selection;
 } RunInfo;
 
@@ -747,12 +751,77 @@ static void clipboard_got_from_guest(SpiceMainChannel *main, guint selection,
     g_free(conv);
 }
 
-static void clipboard_agent_connected(RunInfo *ri)
+static void selection_agent_connected(RunInfo *ri)
 {
-    g_warning("agent status changed, cancel clipboard request");
-
+    g_warning("agent status changed, cancel selection request");
     if (g_main_loop_is_running(ri->loop))
         g_main_loop_quit(ri->loop);
+}
+
+static void selection_received_cb(SpiceMainChannel *channel,
+                                  guint selection,
+                                  const guchar *data, guint size,
+                                  gpointer user_data)
+{
+
+}
+
+static void selection_get(SpiceGtkSession *self,
+                          GtkSelectionData *selection_data,
+                          guint selection,
+                          guint info, GdkAtom type)
+{
+    RunInfo ri = { NULL, };
+    SpiceGtkSessionPrivate *s = self->priv;
+    gulong selection_handler;
+    gulong agent_handler;
+    gboolean run;
+
+    g_return_if_fail(s->main != NULL);
+
+    ri.self = self;
+    ri.loop = g_main_loop_new(NULL, FALSE);
+    ri.selection_data = selection_data;
+    ri.selection = selection;
+    ri.info = info;
+    ri.type = type;
+
+    selection_handler =
+        g_signal_connect(s->main,type ? "main-selection-data" : "main-clipboard-selection",
+                         type ? G_CALLBACK(selection_received_cb) :
+                                G_CALLBACK(clipboard_got_from_guest),
+                         &ri);
+    agent_handler =
+        g_signal_connect_swapped(s->main, "notify::agent-connected",
+                                 G_CALLBACK(selection_agent_connected),
+                                 &ri);
+
+    if (type) {
+        gchar *type_name = gdk_atom_name(type);
+        run = spice_main_channel_clipboard_selection_request(s->main, selection, type_name);
+        g_free(type_name);
+    } else {
+        spice_main_clipboard_selection_request(s->main, selection,
+                                               atom2agent[info].vdagent);
+        g_object_get(s->main, "agent-connected", &run, NULL);
+    }
+    if (!run)
+        goto cleanup;
+
+    /* This is modeled on the implementation of gtk_dialog_run() even though
+     * these thread functions are deprecated and appears to be needed to avoid
+     * dead-lock from gtk_dialog_run().
+     */
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    gdk_threads_leave();
+    g_main_loop_run(ri.loop);
+    gdk_threads_enter();
+G_GNUC_END_IGNORE_DEPRECATIONS
+
+cleanup:
+    g_clear_pointer(&ri.loop, g_main_loop_unref);
+    g_signal_handler_disconnect(s->main, selection_handler);
+    g_signal_handler_disconnect(s->main, agent_handler);
 }
 
 static void clipboard_get(GtkClipboard *clipboard,
@@ -761,12 +830,8 @@ static void clipboard_get(GtkClipboard *clipboard,
 {
     g_return_if_fail(SPICE_IS_GTK_SESSION(user_data));
 
-    RunInfo ri = { NULL, };
     SpiceGtkSession *self = user_data;
     SpiceGtkSessionPrivate *s = self->priv;
-    gboolean agent_connected = FALSE;
-    gulong clipboard_handler;
-    gulong agent_handler;
     int selection;
 
     SPICE_DEBUG("clipboard get");
@@ -774,45 +839,8 @@ static void clipboard_get(GtkClipboard *clipboard,
     selection = get_selection_from_clipboard(s, clipboard);
     g_return_if_fail(selection != -1);
     g_return_if_fail(info < SPICE_N_ELEMENTS(atom2agent));
-    g_return_if_fail(s->main != NULL);
 
-    ri.selection_data = selection_data;
-    ri.info = info;
-    ri.loop = g_main_loop_new(NULL, FALSE);
-    ri.selection = selection;
-    ri.self = self;
-
-    clipboard_handler = g_signal_connect(s->main, "main-clipboard-selection",
-                                         G_CALLBACK(clipboard_got_from_guest),
-                                         &ri);
-    agent_handler = g_signal_connect_swapped(s->main, "notify::agent-connected",
-                                     G_CALLBACK(clipboard_agent_connected),
-                                     &ri);
-
-    spice_main_channel_clipboard_selection_request(s->main, selection,
-                                                   atom2agent[info].vdagent);
-
-
-    g_object_get(s->main, "agent-connected", &agent_connected, NULL);
-    if (!agent_connected) {
-        SPICE_DEBUG("canceled clipboard_get, before running loop");
-        goto cleanup;
-    }
-
-    /* This is modeled on the implementation of gtk_dialog_run() even though
-     * these thread functions are deprecated and appears to be needed to avoid
-     * dead-lock from gtk_dialog_run().
-     */
-    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-    gdk_threads_leave();
-    g_main_loop_run(ri.loop);
-    gdk_threads_enter();
-    G_GNUC_END_IGNORE_DEPRECATIONS
-
-cleanup:
-    g_clear_pointer(&ri.loop, g_main_loop_unref);
-    g_signal_handler_disconnect(s->main, clipboard_handler);
-    g_signal_handler_disconnect(s->main, agent_handler);
+    selection_get(self, selection_data, selection, info, NULL);
 }
 
 static void clipboard_clear(GtkClipboard *clipboard, gpointer user_data)
