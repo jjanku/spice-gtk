@@ -167,6 +167,10 @@ enum {
     SPICE_MAIN_CLIPBOARD_SELECTION_RELEASE,
     SPICE_MIGRATION_STARTED,
     SPICE_MAIN_NEW_FILE_TRANSFER,
+    SPICE_MAIN_SELECTION_GRAB,
+    SPICE_MAIN_SELECTION_REQUEST,
+    SPICE_MAIN_SELECTION_DATA,
+    SPICE_MAIN_SELECTION_RELEASE,
     SPICE_MAIN_LAST_SIGNAL,
 };
 
@@ -851,6 +855,50 @@ static void spice_main_channel_class_init(SpiceMainChannelClass *klass)
                      1,
                      G_TYPE_OBJECT);
 
+    signals[SPICE_MAIN_SELECTION_GRAB] =
+        g_signal_new("main-selection-grab",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_user_marshal_VOID__UINT_BOXED,
+                     G_TYPE_NONE,
+                     2,
+                     G_TYPE_UINT, G_TYPE_STRV);
+
+    signals[SPICE_MAIN_SELECTION_REQUEST] =
+        g_signal_new("main-selection-request",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_user_marshal_VOID__UINT_STRING,
+                     G_TYPE_NONE,
+                     2,
+                     G_TYPE_UINT, G_TYPE_STRING);
+
+    signals[SPICE_MAIN_SELECTION_DATA] =
+        g_signal_new("main-selection-data",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_user_marshal_VOID__UINT_POINTER_UINT,
+                     G_TYPE_NONE,
+                     3,
+                     G_TYPE_UINT, G_TYPE_POINTER, G_TYPE_UINT);
+
+    signals[SPICE_MAIN_SELECTION_RELEASE] =
+        g_signal_new("main-selection-release",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_marshal_VOID__UINT,
+                     G_TYPE_NONE,
+                     1,
+                     G_TYPE_UINT);
+
     g_type_class_add_private(klass, sizeof(SpiceMainChannelPrivate));
     channel_set_handlers(SPICE_CHANNEL_CLASS(klass));
 }
@@ -1339,6 +1387,7 @@ static void agent_announce_caps(SpiceMainChannel *channel)
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_CLIPBOARD_SELECTION);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_MONITORS_CONFIG_POSITION);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_FILE_XFER_DETAILED_ERRORS);
+    VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_SELECTION_DATA);
 
     agent_msg_queue(channel, VD_AGENT_ANNOUNCE_CAPABILITIES, size, caps);
     g_free(caps);
@@ -2085,6 +2134,73 @@ static void main_agent_handle_msg(SpiceChannel *channel,
     case VD_AGENT_FILE_XFER_STATUS:
         main_agent_handle_xfer_status(self, payload);
         break;
+    case VD_AGENT_SELECTION_GRAB:
+    {
+        VDAgentSelectionGrab *sel = payload;
+        GStrv types;
+        gsize n, i, len;
+
+        len = msg->size - sizeof(VDAgentSelectionGrab);
+        if (len < 2 || sel->types[len - 1] || !sel->types[0])
+            goto error_format;
+
+        for (i = 1, n = 0; i < len; i++) {
+            if (sel->types[i])
+                continue;
+            if (!sel->types[i] && !sel->types[i-1])
+                goto error_format;
+            n++;
+        }
+
+        types = g_new(gchar *, n + 1);
+        types[n] = NULL;
+        types[0] = (gchar *)&(sel->types[0]);
+        for (i = 1, n = 1; i < len; i++) {
+            if (!sel->types[i-1]) {
+                types[n] = (gchar *)&(sel->types[i]);
+                n++;
+            }
+        }
+
+        g_coroutine_signal_emit(channel, signals[SPICE_MAIN_SELECTION_GRAB], 0,
+                                sel->selection, types);
+        g_free(types);
+        break;
+    error_format:
+        g_warning("agent selection grab: data types formated inproperly");
+        break;
+    }
+    case VD_AGENT_SELECTION_REQUEST:
+    {
+        VDAgentSelectionRequest *sel = payload;
+        gsize i, len;
+
+        len = msg->size - sizeof(VDAgentSelectionRequest);
+        for (i = 0; i < len; i++)
+            if (!sel->type[i])
+                break;
+        if (i != len - 1 || len < 2) {
+            g_warning("agent selection request: data type formated inproperly");
+            break;
+        }
+
+        g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_REQUEST], 0,
+                                sel->selection, sel->type);
+        break;
+    }
+    case VD_AGENT_SELECTION_DATA:
+    {
+        VDAgentSelectionData *sel = payload;
+        g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_DATA], 0,
+                                sel->selection, sel->data, msg->size - sizeof(VDAgentSelectionData));
+        break;
+    }
+    case VD_AGENT_SELECTION_RELEASE:
+    {
+        VDAgentSelectionRelease *sel = payload;
+        g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_RELEASE], 0, sel->selection);
+        break;
+    }
     default:
         g_warning("unhandled agent message type: %u (%s), size %u",
                   msg->type, NAME(agent_msg_types, msg->type), msg->size);
