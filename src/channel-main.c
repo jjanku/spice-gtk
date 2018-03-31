@@ -164,6 +164,10 @@ enum {
     SPICE_MAIN_CLIPBOARD_SELECTION_RELEASE,
     SPICE_MIGRATION_STARTED,
     SPICE_MAIN_NEW_FILE_TRANSFER,
+    SPICE_MAIN_SELECTION_GRAB,
+    SPICE_MAIN_SELECTION_DATA,
+    SPICE_MAIN_SELECTION_RELEASE,
+    SPICE_MAIN_SELECTION_REQUEST,
     SPICE_MAIN_LAST_SIGNAL,
 };
 
@@ -848,6 +852,95 @@ static void spice_main_channel_class_init(SpiceMainChannelClass *klass)
                      1,
                      G_TYPE_OBJECT);
 
+    /**
+     * SpiceMainChannel::main-selection-grab:
+     * @main: the #SpiceMainChannel that emitted the signal
+     * @selection: VD_AGENT_CLIPBOARD_SELECTION_*
+     * @targets: advertised MIME types
+     *
+     * Inform that selection data is available from the guest
+     * and in which formats it can be provided.
+     *
+     * Since: 0.36
+     **/
+    signals[SPICE_MAIN_SELECTION_GRAB] =
+        g_signal_new("main-selection-grab",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_user_marshal_VOID__UINT_BOXED,
+                     G_TYPE_NONE,
+                     2,
+                     G_TYPE_UINT, G_TYPE_STRV);
+
+    /**
+     * SpiceMainChannel::main-selection-data:
+     * @main: the #SpiceMainChannel that emitted the signal
+     * @selection: VD_AGENT_CLIPBOARD_SELECTION_*
+     * @format: number of bits per unit of @data
+     * @type: MIME type of @data
+     * @data: selection data
+     * @size: size of @data in bytes
+     *
+     * Inform that selection data has been retrieved.
+     *
+     * Since: 0.36
+     **/
+    signals[SPICE_MAIN_SELECTION_DATA] =
+        g_signal_new("main-selection-data",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_user_marshal_VOID__UINT_INT_STRING_POINTER_UINT,
+                     G_TYPE_NONE,
+                     5,
+                     G_TYPE_UINT, G_TYPE_INT, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_UINT);
+
+    /**
+     * SpiceMainChannel::main-selection-release:
+     * @main: the #SpiceMainChannel that emitted the signal
+     * @selection: VD_AGENT_CLIPBOARD_SELECTION_*
+     *
+     * Inform that the selection in the guest has been released
+     * and selection data is not available anymore.
+     *
+     * Since: 0.36
+     **/
+    signals[SPICE_MAIN_SELECTION_RELEASE] =
+        g_signal_new("main-selection-release",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_marshal_VOID__UINT,
+                     G_TYPE_NONE,
+                     1,
+                     G_TYPE_UINT);
+
+    /**
+     * SpiceMainChannel::main-selection-request:
+     * @main: the #SpiceMainChannel that emitted the signal
+     * @selection: VD_AGENT_CLIPBOARD_SELECTION_*
+     * @target: requested MIME type of selection data
+     *
+     * Request selection data from the client in @target format.
+     *
+     * Since: 0.36
+     **/
+    signals[SPICE_MAIN_SELECTION_REQUEST] =
+        g_signal_new("main-selection-request",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_user_marshal_VOID__UINT_STRING,
+                     G_TYPE_NONE,
+                     2,
+                     G_TYPE_UINT, G_TYPE_STRING);
+
+
     channel_set_handlers(SPICE_CHANNEL_CLASS(klass));
 }
 
@@ -1335,6 +1428,7 @@ static void agent_announce_caps(SpiceMainChannel *channel)
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_CLIPBOARD_SELECTION);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_MONITORS_CONFIG_POSITION);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_FILE_XFER_DETAILED_ERRORS);
+    VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_SELECTION_DATA);
 
     agent_msg_queue(channel, VD_AGENT_ANNOUNCE_CAPABILITIES, size, caps);
     g_free(caps);
@@ -2081,6 +2175,55 @@ static void main_agent_handle_msg(SpiceChannel *channel,
     case VD_AGENT_FILE_XFER_STATUS:
         main_agent_handle_xfer_status(self, payload);
         break;
+    case VD_AGENT_SELECTION_GRAB:
+    {
+        VDAgentSelectionGrab *s = payload;
+        gsize len;
+        GStrv targets;
+
+        len = msg->size - sizeof(VDAgentSelectionGrab);
+        targets = spice_buffer_to_strv((gchar *)s->targets, len);
+        g_return_if_fail(targets != NULL);
+
+        g_coroutine_signal_emit(channel, signals[SPICE_MAIN_SELECTION_GRAB], 0,
+                                s->selection, targets);
+        g_free(targets);
+        break;
+    }
+    case VD_AGENT_SELECTION_DATA:
+    {
+        VDAgentSelectionData *s = payload;
+        gsize offset, len;
+
+        len = msg->size - sizeof(VDAgentSelectionData);
+        offset = spice_strnlen((gchar *)s->data, len) + 1;
+        g_return_if_fail(offset <= len);
+
+        g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_DATA], 0,
+                                s->selection, s->format, s->data,
+                                s->data + offset, len - offset);
+        break;
+    }
+    case VD_AGENT_SELECTION_RELEASE:
+    {
+        VDAgentSelectionRelease *s = payload;
+        g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_RELEASE], 0,
+                                s->selection);
+        break;
+    }
+    case VD_AGENT_SELECTION_REQUEST:
+    {
+        VDAgentSelectionRequest *s = payload;
+        gsize str_len, len;
+
+        len = msg->size - sizeof(VDAgentSelectionRequest);
+        str_len = spice_strnlen((gchar *)s->target, len);
+        g_return_if_fail(str_len == len - 1);
+
+        g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_REQUEST], 0,
+                                s->selection, s->target);
+        break;
+    }
     default:
         g_warning("unhandled agent message type: %u (%s), size %u",
                   msg->type, NAME(agent_msg_types, msg->type), msg->size);
@@ -3403,4 +3546,140 @@ gboolean spice_main_channel_file_copy_finish(SpiceMainChannel *channel,
     g_return_val_if_fail(g_task_is_valid(task, channel), FALSE);
 
     return g_task_propagate_boolean(task, error);
+}
+
+static gboolean main_selection_params_valid(SpiceMainChannel *channel,
+                                            guint             selection)
+{
+    g_return_val_if_fail(channel != NULL, FALSE);
+    g_return_val_if_fail(SPICE_IS_MAIN_CHANNEL(channel), FALSE);
+    g_return_val_if_fail(test_agent_cap(channel, VD_AGENT_CAP_SELECTION_DATA), FALSE);
+    g_return_val_if_fail(selection <= VD_AGENT_CLIPBOARD_SELECTION_SECONDARY, FALSE);
+    g_return_val_if_fail( channel->priv->agent_connected, FALSE);
+
+    return TRUE;
+}
+
+/**
+ * spice_main_channel_selection_grab:
+ * @channel: a #SpiceMainChannel
+ * @selection: #VD_AGENT_CLIPBOARD_SELECTION_*
+ * @targets: NULL-terminated array of MIME types to advertise
+ *
+ * Grab the guest selection.
+ *
+ * Since: 0.36
+ **/
+void spice_main_channel_selection_grab(SpiceMainChannel *channel,
+                                       guint             selection,
+                                       const gchar     **targets)
+{
+    VDAgentSelectionGrab *msg;
+    gsize len;
+    guint i;
+    gchar *ptr;
+
+    if (!main_selection_params_valid(channel, selection))
+        return;
+    g_return_if_fail(targets != NULL);
+
+    len = sizeof(VDAgentSelectionGrab);
+    for (i = 0; targets[i]; i++)
+        len += strlen(targets[i]) + 1;
+
+    msg = g_malloc(len);
+    msg->selection = selection;
+    for (i = 0, ptr = (gchar *)msg->targets; targets[i]; i++)
+        ptr = g_stpcpy(ptr, targets[i]) + 1;
+
+    agent_msg_queue(channel, VD_AGENT_SELECTION_GRAB, len, msg);
+    g_free(msg);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
+
+/**
+ * spice_main_channel_selection_send_data:
+ * @channel: a #SpiceMainChannel
+ * @selection: #VD_AGENT_CLIPBOARD_SELECTION_*
+ * @format: number of bits per unit of @data
+ * @type: MIME type of @data
+ * @data: selection data
+ * @size: length of @data in bytes
+ *
+ * Send the selection data to the guest.
+ *
+ * Since: 0.36
+ **/
+void spice_main_channel_selection_send_data(SpiceMainChannel *channel,
+                                            guint             selection,
+                                            gint              format,
+                                            const gchar      *type,
+                                            const guchar     *data,
+                                            gsize             size)
+{
+    VDAgentSelectionData msg;
+
+    if (!main_selection_params_valid(channel, selection))
+        return;
+    g_return_if_fail(type != NULL);
+
+    msg.selection = selection;
+    msg.format = format;
+    agent_msg_queue_many(channel, VD_AGENT_SELECTION_DATA,
+                         &msg, sizeof(msg),
+                         type, strlen(type) + 1,
+                         data, size, NULL);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
+
+/**
+ * spice_main_channel_selection_release:
+ * @channel: a #SpiceMainChannel
+ * @selection: #VD_AGENT_CLIPBOARD_SELECTION_*
+ *
+ * Release grab of the selection,
+ * inform the guest data is not available anymore.
+ *
+ * Since: 0.36
+ **/
+void spice_main_channel_selection_release(SpiceMainChannel *channel,
+                                          guint             selection)
+{
+    VDAgentSelectionRelease msg;
+
+    if (!main_selection_params_valid(channel, selection))
+        return;
+
+    msg.selection = selection;
+    agent_msg_queue(channel, VD_AGENT_SELECTION_RELEASE, sizeof(msg), &msg);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+}
+
+/**
+ * spice_main_channel_selection_request:
+ * @channel: a #SpiceMainChannel
+ * @selection: #VD_AGENT_CLIPBOARD_SELECTION_*
+ * @target: MIME type of selection data to retrieve
+ *
+ * Request selection data from the guest in @target type.
+ * The reply is sent through the #SpiceMainChannel::main-selection-data signal.
+ *
+ * Since: 0.36
+ **/
+gboolean spice_main_channel_selection_request(SpiceMainChannel *channel,
+                                              guint             selection,
+                                              const gchar      *target)
+{
+    VDAgentSelectionRequest msg;
+
+    if (!main_selection_params_valid(channel, selection))
+        return FALSE;
+    g_return_val_if_fail(target != NULL, FALSE);
+
+    msg.selection = selection;
+    agent_msg_queue_many(channel, VD_AGENT_SELECTION_REQUEST,
+                         &msg, sizeof(msg),
+                         target, strlen(target) + 1, NULL);
+    spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
+    return TRUE;
 }
