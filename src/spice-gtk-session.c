@@ -1256,6 +1256,10 @@ static void selection_request(SpiceMainChannel *main,
                               const gchar      *target,
                               gpointer          user_data)
 {
+    /* this is handled in spice-widget.c */
+    if (selection == VD_AGENT_DND_SELECTION)
+        return;
+
     g_return_if_fail(SPICE_IS_GTK_SESSION(user_data));
 
     SpiceGtkSession *self = user_data;

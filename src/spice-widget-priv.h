@@ -151,6 +151,10 @@ struct _SpiceDisplayPrivate {
         SpiceGlScanout      scanout;
     } egl;
 #endif // HAVE_EGL
+
+    GdkDragContext          *drag_context;
+    gboolean                drag_ongoing;
+    guint                   drag_timer_id;
 };
 
 int      spice_cairo_image_create                 (SpiceDisplay *display);

@@ -171,6 +171,7 @@ enum {
     SPICE_MAIN_SELECTION_DATA,
     SPICE_MAIN_SELECTION_RELEASE,
     SPICE_MAIN_SELECTION_REQUEST,
+    SPICE_MAIN_DND_STATUS,
     SPICE_MAIN_LAST_SIGNAL,
 };
 
@@ -934,6 +935,17 @@ static void spice_main_channel_class_init(SpiceMainChannelClass *klass)
                      G_TYPE_NONE,
                      2,
                      G_TYPE_UINT, G_TYPE_STRING);
+
+    signals[SPICE_MAIN_DND_STATUS] =
+        g_signal_new("main-dnd-status",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_marshal_VOID__UINT,
+                     G_TYPE_NONE,
+                     1,
+                     G_TYPE_BOOLEAN);
 
     g_type_class_add_private(klass, sizeof(SpiceMainChannelPrivate));
     channel_set_handlers(SPICE_CHANNEL_CLASS(klass));
@@ -2238,6 +2250,12 @@ static void main_agent_handle_msg(SpiceChannel *channel,
 
         g_coroutine_signal_emit(self, signals[SPICE_MAIN_SELECTION_REQUEST], 0,
                                 s->selection, s->target);
+        break;
+    }
+    case VD_AGENT_DND_STATUS:
+    {
+        VDAgentDNDStatusMessage *dnd = payload;
+        g_coroutine_signal_emit(self, signals[SPICE_MAIN_DND_STATUS], 0, dnd->status);
         break;
     }
     default:
@@ -3570,7 +3588,7 @@ static gboolean main_selection_params_valid(SpiceMainChannel *channel,
     g_return_val_if_fail(channel != NULL, FALSE);
     g_return_val_if_fail(SPICE_IS_MAIN_CHANNEL(channel), FALSE);
     g_return_val_if_fail(test_agent_cap(channel, VD_AGENT_CAP_SELECTION_DATA), FALSE);
-    g_return_val_if_fail(selection <= VD_AGENT_CLIPBOARD_SELECTION_SECONDARY, FALSE);
+    g_return_val_if_fail(selection <= VD_AGENT_DND_SELECTION, FALSE);
 
     return channel->priv->agent_connected;
 }
