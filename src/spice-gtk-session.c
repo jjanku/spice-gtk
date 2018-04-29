@@ -854,27 +854,23 @@ static void clipboard_agent_connected(RunInfo *ri)
         g_main_loop_quit(ri->loop);
 }
 
-static void clipboard_get(GtkClipboard *clipboard,
-                          GtkSelectionData *selection_data,
-                          guint info, gpointer user_data)
+static void selection_data_get(SpiceGtkSession *self, guint selection,
+                               GtkSelectionData *selection_data, guint info)
 {
-    g_return_if_fail(SPICE_IS_GTK_SESSION(user_data));
-
     RunInfo ri = { NULL, };
-    SpiceGtkSession *self = user_data;
     SpiceGtkSessionPrivate *s = self->priv;
     gboolean agent_connected = FALSE;
     gulong clipboard_handler;
     gulong agent_handler;
     gchar *target;
 
-    SPICE_DEBUG("clipboard get");
+    SPICE_DEBUG("selection get");
 
-    ri.selection = get_selection_from_clipboard(s, clipboard);
-    g_return_if_fail(ri.selection != -1);
+    g_return_if_fail(selection != -1);
     g_return_if_fail(info < SPICE_N_ELEMENTS(atom2agent));
     g_return_if_fail(s->main != NULL);
 
+    ri.selection = selection;
     ri.selection_data = selection_data;
     ri.info = info;
     ri.loop = g_main_loop_new(NULL, FALSE);
@@ -901,7 +897,7 @@ static void clipboard_get(GtkClipboard *clipboard,
 
     g_object_get(s->main, "agent-connected", &agent_connected, NULL);
     if (!agent_connected) {
-        SPICE_DEBUG("canceled clipboard_get, before running loop");
+        SPICE_DEBUG("canceled selection_get, before running loop");
         goto cleanup;
     }
 
@@ -919,6 +915,18 @@ cleanup:
     g_clear_pointer(&ri.loop, g_main_loop_unref);
     g_signal_handler_disconnect(s->main, clipboard_handler);
     g_signal_handler_disconnect(s->main, agent_handler);
+}
+
+static void clipboard_get(GtkClipboard *clipboard,
+                          GtkSelectionData *selection_data,
+                          guint info, gpointer user_data)
+{
+    g_return_if_fail(SPICE_IS_GTK_SESSION(user_data));
+    SpiceGtkSession *self = user_data;
+    SpiceGtkSessionPrivate *s = self->priv;
+    guint selection = get_selection_from_clipboard(s, clipboard);
+
+    selection_data_get(self, selection, selection_data, info);
 }
 
 static void clipboard_clear(GtkClipboard *clipboard, gpointer user_data)
