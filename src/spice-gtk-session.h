@@ -22,6 +22,7 @@
 #warning "Only <spice-client-gtk.h> can be included directly"
 #endif
 
+#include <gtk/gtk.h>
 #include "spice-client.h"
 
 G_BEGIN_DECLS
@@ -52,6 +53,11 @@ GType spice_gtk_session_get_type(void);
 SpiceGtkSession *spice_gtk_session_get(SpiceSession *session);
 void spice_gtk_session_copy_to_guest(SpiceGtkSession *self);
 void spice_gtk_session_paste_from_guest(SpiceGtkSession *self);
+
+void spice_gtk_session_button_event(SpiceGtkSession *self, GdkEventButton *event);
+gboolean spice_gtk_session_cancel_drag(GtkWidget *widget);
+GdkDragContext * spice_gtk_session_get_drag_source_context(SpiceGtkSession *self);
+guint spice_gtk_session_get_drag_button_state(SpiceGtkSession *self);
 
 G_END_DECLS
 
