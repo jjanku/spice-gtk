@@ -190,6 +190,38 @@ static void test_mono_edge_highlight(void)
     }
 }
 
+static void test_buffer_to_strv(void)
+{
+    struct {
+        gchar *buff;
+        gssize len;
+        gchar *strv[8];
+    } tests[] = {
+        { "", 1, {"", NULL} },
+        { "a\0b", 4, {"a", "b", NULL} },
+        { "\0ab", 4, {"", "ab", NULL} },
+        { "ab\0", 4, {"ab", "", NULL} },
+        { "a\0\0",4, {"a", "", "", NULL} },
+        { "\0a\0",4, {"", "a", "", NULL} },
+        { "\0\0", 3, {"", "", "", NULL} }
+    };
+
+    guint i, j, strv_len;
+    GStrv strv;
+
+    for (i = 0; i < G_N_ELEMENTS(tests); i++) {
+        strv = spice_buffer_to_strv(tests[i].buff, tests[i].len);
+        strv_len = g_strv_length(strv);
+
+        g_assert_cmpuint(strv_len, ==, g_strv_length(tests[i].strv));
+        for (j = 0; j < strv_len; j++) {
+            g_assert_cmpstr(strv[j], ==, tests[i].strv[j]);
+        }
+
+        g_free(strv);
+    }
+}
+
 int main(int argc, char* argv[])
 {
   g_test_init(&argc, &argv, NULL);
@@ -197,6 +229,7 @@ int main(int argc, char* argv[])
   g_test_add_func("/util/dos2unix", test_dos2unix);
   g_test_add_func("/util/unix2dos", test_unix2dos);
   g_test_add_func("/util/mono_edge_highlight", test_mono_edge_highlight);
+  g_test_add_func("/util/buffer_to_strv", test_buffer_to_strv);
 
   return g_test_run ();
 }

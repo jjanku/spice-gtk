@@ -476,3 +476,44 @@ void spice_mono_edge_highlight(unsigned width, unsigned height,
         xor += bpl;
     }
 }
+
+/**
+ * spice_buffer_to_strv:
+ * @buff: char array to split
+ * @len: size of @buff
+ *
+ * Splits given buffer by '\0' character into string array.
+ * Each '\0' char is perceived as an end of one string.
+ *
+ * Returns: A newly-allocated NULL-terminated string array.
+ * Each element points back to the given @buff.
+ * Use g_free() to free the result (NOT g_strfreev()).
+ **/
+G_GNUC_INTERNAL
+GStrv spice_buffer_to_strv(const gchar *buff, gssize len)
+{
+    GSList *list = NULL, *l;
+    GStrv array;
+    gssize i, n;
+
+    g_return_val_if_fail(buff != NULL, NULL);
+    g_return_val_if_fail(buff[len-1] == '\0', NULL);
+
+    n = 1;
+    for (i = len-2; i >= 0; i--) {
+        if (buff[i] == '\0') {
+            list = g_slist_prepend(list, (gchar *)&buff[i+1]);
+            n++;
+        }
+    }
+    list = g_slist_prepend(list, (gchar *)buff);
+
+    array = g_new(gchar *, n+1);
+    array[n] = NULL;
+    for (i = 0, l = list; l; l = l->next, i++) {
+        array[i] = l->data;
+    }
+
+    g_slist_free(list);
+    return array;
+}

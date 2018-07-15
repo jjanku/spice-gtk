@@ -32,6 +32,7 @@ gchar* spice_unix2dos(const gchar *str, gssize len);
 gchar* spice_dos2unix(const gchar *str, gssize len);
 void spice_mono_edge_highlight(unsigned width, unsigned hight,
                                const guint8 *and, const guint8 *xor, guint8 *dest);
+GStrv spice_buffer_to_strv(const gchar *buff, gssize len);
 
 G_END_DECLS
 
