@@ -164,6 +164,7 @@ enum {
     SPICE_MAIN_CLIPBOARD_SELECTION_RELEASE,
     SPICE_MIGRATION_STARTED,
     SPICE_MAIN_NEW_FILE_TRANSFER,
+    SPICE_MAIN_GUEST_NOTIFICATION,
     SPICE_MAIN_LAST_SIGNAL,
 };
 
@@ -848,6 +849,27 @@ static void spice_main_channel_class_init(SpiceMainChannelClass *klass)
                      1,
                      G_TYPE_OBJECT);
 
+    /**
+     * SpiceMainChannel::guest-notification:
+     * @main: the #SpiceMainChannel that emitted the signal
+     * @app_name: name of the app that issued the notification
+     * @summary: single-line overview
+     * @body: multi-line description
+     *
+     * This signal is emitted when an app on the guest side sends a
+     * new notification to the notification server.
+     **/
+    signals[SPICE_MAIN_GUEST_NOTIFICATION] =
+        g_signal_new("guest-notification",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     g_cclosure_user_marshal_VOID__STRING_STRING_STRING,
+                     G_TYPE_NONE,
+                     3,
+                     G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+
     channel_set_handlers(SPICE_CHANNEL_CLASS(klass));
 }
 
@@ -1335,6 +1357,7 @@ static void agent_announce_caps(SpiceMainChannel *channel)
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_CLIPBOARD_SELECTION);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_MONITORS_CONFIG_POSITION);
     VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_FILE_XFER_DETAILED_ERRORS);
+    VD_AGENT_SET_CAPABILITY(caps->caps, VD_AGENT_CAP_GUEST_NOTIFICATIONS);
 
     agent_msg_queue(channel, VD_AGENT_ANNOUNCE_CAPABILITIES, size, caps);
     g_free(caps);
@@ -2081,6 +2104,21 @@ static void main_agent_handle_msg(SpiceChannel *channel,
     case VD_AGENT_FILE_XFER_STATUS:
         main_agent_handle_xfer_status(self, payload);
         break;
+    case VD_AGENT_GUEST_NOTIFICATION:
+    {
+        VDAgentGuestNotification *notification = payload;
+        GStrv strv;
+
+        strv = spice_buffer_to_strv((gchar *)notification->data, msg->size);
+        if (strv && g_strv_length(strv) == 3) {
+            g_coroutine_signal_emit(self, signals[SPICE_MAIN_GUEST_NOTIFICATION], 0,
+                                    strv[0], strv[1], strv[2]);
+        } else {
+            g_warning("%s: received malformed guest notification data", __FUNCTION__);
+        }
+        g_free(strv);
+        break;
+    }
     default:
         g_warning("unhandled agent message type: %u (%s), size %u",
                   msg->type, NAME(agent_msg_types, msg->type), msg->size);
